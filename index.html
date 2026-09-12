@@ -327,7 +327,8 @@
         const rms = Math.sqrt(sumSquares / rawData.length);
         
         if (rms > 0.0001) {
-            const targetRms = 0.45; 
+            // Increased from 0.45 to 0.85 to make the baseline recording louder
+            const targetRms = 0.85; 
             const multiplier = targetRms / rms;
             let peak = 0;
             
@@ -353,10 +354,10 @@
         setStatus("Playing: " + mode, "#0a84ff");
 
         let lastNode = source;
-        
-        // Output gain and clean soft-limiter to prevent clipping
+                // Output gain and clean soft-limiter to prevent clipping
         const finalGain = audioCtx.createGain();
-        finalGain.gain.value = 2.0; 
+        // Boosted from 2.0 to 5.0 for much louder output
+        finalGain.gain.value = 5.0; 
         
         const limiter = audioCtx.createWaveShaper();
         limiter.curve = makeDistortionCurve(1.5); 
