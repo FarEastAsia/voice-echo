@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Changer</title>
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif; 
+            text-align: center; 
+            padding: 2rem; 
+            background: #111; 
+            color: #fff; 
+        }
+        button { 
+            padding: 1rem 2rem; 
+            font-size: 1.1rem; 
+            font-weight: 600;
+            border-radius: 12px; 
+            border: none; 
+            background: #007aff; 
+            color: white; 
+            cursor: pointer; 
+            margin: 6px; 
+        }
+        button:disabled { background: #333; color: #777; cursor: not-allowed; }
+        #status { font-size: 1.8rem; font-weight: 700; margin: 1.5rem 0; color: #32d74b; }
+        .meter-container { 
+            width: 280px; 
+            height: 18px; 
+            background: #222; 
+            border-radius: 9px; 
+            margin: 0 auto 1.5rem auto; 
+            overflow: hidden; 
+            border: 1px solid #444; 
+        }
+        #meter-bar { width: 0%; height: 100%; background: #32d74b; transition: width 0.05s linear; }
+        #log { 
+            margin-top: 1.5rem; 
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace; 
+            font-size: 0.85rem; 
+            color: #888; 
+            text-align: left; 
+            max-width: 420px; 
+            margin-left: auto; 
+            margin-right: auto; 
+            max-height: 220px; 
+            overflow-y: auto; 
+        }
+    </style>
+</head>
+<body>
+
+    <h2>Voice Echo</h2>
+    <button id="startBtn">Enable Microphone</button>
+    <button id="manualBtn" disabled>Manual Record</button>
+
+    <div id="status">Tap Enable Microphone</div>
+
+    <div class="meter-container">
+        <div id="meter-bar"></div>
+    </div>
+
+    <div id="log"></div>
+
+<script>
+    const voices = [
+        "duck", "chipmunk", "chicken", "elephant", "tiger", 
+        "horse", "monkey", "robot", "dalek", "ghost", "bee", "echo"
+    ];
+
+    let audioCtx, mediaStream, analyser, mediaRecorder;
+    let recordedChunks = [];
+    let isListening = false;
+    let isRecording = false;
+    let isPlaying = false;
+    let manualMode = false;
+
+    // Adaptive noise tracking (matching echo.py)
+    let ambientNoiseFloor = 10;
+    let noiseSamples = [];
+    let silenceStart = null;
+    let speechStart = null;
+    let recordStartTime = null;
+
+    const SILENCE_LIMIT_MS = 750; // Milliseconds of silence to trigger playback
+    const MAX_RECORD_MS = 6000;   // Hard timeout fail-safe
+
+    const startBtn = document.getElementById('startBtn');
+    const manualBtn = document.getElementById('manualBtn');
+    const statusEl = document.getElementById('status');
+    const meterBar = document.getElementById('meter-bar');
+    const logEl = document.getElementById('log');
+
+    function log(msg) {
+        const item = document.createElement('div');
+        item.innerText = msg;
+        logEl.prepend(item);
+    }
+
+    function setStatus(text, color="#32d74b") {
+        statusEl.innerText = text;
+        statusEl.style.color = color;
+    }
+
+    startBtn.addEventListener('click', async () => {
+        startBtn.disabled = true;
+
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') {
+            await audioCtx.resume();
+        }
+
+        try {
+            mediaStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: true
+                }
+            });
+
+            const source = audioCtx.createMediaStreamSource(mediaStream);
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 512;
+            analyser.smoothingTimeConstant = 0.2;
+            source.connect(analyser);
+
+            manualBtn.disabled = false;
+            isListening = true;
+            setStatus("Listening...");
+            log("Calibrating background noise...");
+
+            requestAnimationFrame(pollAudioLevel);
+
+        } catch (err) {
+            log("Error: " + err.message);
+            setStatus("Mic Blocked", "#ff453a");
+            startBtn.disabled = false;
+        }
+    });
+
+    manualBtn.addEventListener('click', () => {
+        if (!isRecording) {
+            manualMode = true;
+            beginRecording();
+            manualBtn.innerText = "Stop & Transform";
+        } else {
+            manualMode = false;
+            manualBtn.innerText = "Manual Record";
+            finishRecording();
+        }
+    });
+
+    function pollAudioLevel() {
+        if (!isListening || isPlaying) {
+            requestAnimationFrame(pollAudioLevel);
+            return;
+        }
+
+        const buffer = new Uint8Array(analyser.fftSize);
+        analyser.getByteTimeDomainData(buffer);
+
+        let maxDeviation = 0;
+        for (let i = 0; i < buffer.length; i++) {
+            const dev = Math.abs(buffer[i] - 128);
+            if (dev > maxDeviation) maxDeviation = dev;
+        }
+
+        const volume = Math.min(100, Math.round((maxDeviation / 128) * 100));
+        meterBar.style.width = volume + "%";
+        meterBar.style.background = isRecording ? "#ff3b30" : "#32d74b";
+
+        const now = performance.now();
+
+        // 1. Adaptively learn ambient background level when not recording
+        if (!isRecording) {
+            noiseSamples.push(volume);
+            if (noiseSamples.length > 40) noiseSamples.shift();
+            const avgFloor = noiseSamples.reduce((a, b) => a + b, 0) / noiseSamples.length;
+            ambientNoiseFloor = ambientNoiseFloor * 0.9 + avgFloor * 0.1;
+        }
+
+        // Trigger dynamic thresholds:
+        // Speech must rise above background floor by +8%
+        // Silence is recognized when volume drops back close to background (+3%)
+        const startThreshold = ambientNoiseFloor + 8;
+        const stopThreshold = ambientNoiseFloor + 3;
+
+        if (manualMode) {
+            requestAnimationFrame(pollAudioLevel);
+            return;
+        }
+
+        if (!isRecording) {
+            if (volume > startThreshold) {
+                if (!speechStart) speechStart = now;
+                if (now - speechStart > 80) { // 80ms quick pickup
+                    beginRecording();
+                }
+            } else {
+                speechStart = null;
+            }
+        } else {
+            // Hard timeout fail-safe
+            if (now - recordStartTime > MAX_RECORD_MS) {
+                log("Max duration reached.");
+                finishRecording();
+                requestAnimationFrame(pollAudioLevel);
+                return;
+            }
+
+            // Silence counter
+            if (volume <= stopThreshold) {
+                if (!silenceStart) silenceStart = now;
+                if (now - silenceStart > SILENCE_LIMIT_MS) {
+                    finishRecording();
+                }
+            } else {
+                silenceStart = null;
+            }
+        }
+
+        requestAnimationFrame(pollAudioLevel);
+    }
+
+    function beginRecording() {
+        isRecording = true;
+        silenceStart = null;
+        speechStart = null;
+        recordStartTime = performance.now();
+        recordedChunks = [];
+        setStatus("Recording...", "#ff3b30");
+
+        const mimeType = MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : 'audio/webm';
+        mediaRecorder = new MediaRecorder(mediaStream, { mimeType });
+
+        mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) recordedChunks.push(e.data);
+        };
+
+        mediaRecorder.onstop = processPlayback;
+        mediaRecorder.start(100);
+    }
+
+    function finishRecording() {
+        if (!isRecording) return;
+        isRecording = false;
+        setStatus("Processing...", "#ffcc00");
+        if (mediaRecorder && mediaRecorder.state !== "inactive") {
+            mediaRecorder.stop();
+        }
+    }
+
+    async function processPlayback() {
+        isPlaying = true;
+        meterBar.style.width = "0%";
+
+        const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
+        const arrayBuffer = await blob.arrayBuffer();
+        
+        let audioBuffer;
+        try {
+            audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+        } catch (e) {
+            log("Audio decode failed: " + e.message);
+            resumeListening();
+            return;
+        }
+
+        const source = audioCtx.createBufferSource();
+        source.buffer = audioBuffer;
+
+        const mode = voices[Math.floor(Math.random() * voices.length)];
+        log("Effect: " + mode);
+        setStatus("Playing: " + mode, "#0a84ff");
+
+        let lastNode = source;
+        const mainGain = audioCtx.createGain();
+        mainGain.gain.value = 1.2;
+        mainGain.connect(audioCtx.destination);
+
+        if (mode === "chipmunk") {
+            source.playbackRate.value = 2.0;
+        } else if (mode === "duck" || mode === "chicken" || mode === "monkey") {
+            source.playbackRate.value = 1.45;
+            const shaper = audioCtx.createWaveShaper();
+            shaper.curve = makeDistortionCurve(2.5);
+            lastNode.connect(shaper);
+            lastNode = shaper;
+        } else if (mode === "elephant" || mode === "tiger" || mode === "horse") {
+            source.playbackRate.value = 0.65;
+            const shaper = audioCtx.createWaveShaper();
+            shaper.curve = makeDistortionCurve(4.0);
+            lastNode.connect(shaper);
+            lastNode = shaper;
+        } else if (mode === "robot" || mode === "dalek" || mode === "bee") {
+            const osc = audioCtx.createOscillator();
+            osc.type = 'sine';
+            osc.frequency.value = (mode === "robot") ? 70 : (mode === "dalek" ? 40 : 220);
+
+            const ringMod = audioCtx.createGain();
+            ringMod.gain.value = 0;
+            osc.connect(ringMod.gain);
+            lastNode.connect(ringMod);
+            lastNode = ringMod;
+            osc.start();
+            osc.stop(audioCtx.currentTime + (audioBuffer.duration / source.playbackRate.value) + 0.5);
+        } else if (mode === "echo" || mode === "ghost") {
+            const delay = audioCtx.createDelay();
+            delay.delayTime.value = mode === "echo" ? 0.25 : 0.07;
+            const feedback = audioCtx.createGain();
+            feedback.gain.value = mode === "echo" ? 0.5 : 0.75;
+
+            lastNode.connect(delay);
+            delay.connect(feedback);
+            feedback.connect(delay);
+            delay.connect(mainGain);
+        }
+
+        lastNode.connect(mainGain);
+        source.start();
+
+        source.onended = () => {
+            setTimeout(resumeListening, 300);
+        };
+    }
+
+    function resumeListening() {
+        isPlaying = false;
+        setStatus("Listening...");
+        log("Listening...");
+    }
+
+    function makeDistortionCurve(amount) {
+        const n_samples = 44100;
+        const curve = new Float32Array(n_samples);
+        for (let i = 0; i < n_samples; i++) {
+            const x = (i * 2) / n_samples - 1;
+            curve[i] = Math.tanh(x * amount);
+        }
+        return curve;
+    }
+</script>
+
+</body>
+</html>
