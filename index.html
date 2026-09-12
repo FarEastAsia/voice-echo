@@ -70,6 +70,7 @@
     ];
 
     let audioCtx, mediaStream, analyser, mediaRecorder;
+    let pollInterval = null;
     let recordedChunks = [];
     let isListening = false;
     let isRecording = false;
@@ -77,19 +78,17 @@
     let manualMode = false;
 
     // Adaptive noise tracking
-    let ambientNoiseFloor = 10;
+    let ambientNoiseFloor = 12;
     let noiseSamples = [];
     let silenceStart = null;
     let speechStart = null;
     let recordStartTime = null;
 
-    // Tuning constants
-    // Raised TRIGGER_DELTA so ordinary background noise/breathing won't trigger recording
-    let TRIGGER_DELTA = 16;       // Voice must be this many points above ambient background
-    const STOP_DELTA = 4;         // Silence registers when dropping back near background
-    const SILENCE_LIMIT_MS = 700; // Time in silence before playback begins
-    const MIN_SPEECH_MS = 120;    // Filter out quick clicks/taps
-    const MAX_RECORD_MS = 6000;   // Hard timeout limit
+    let TRIGGER_DELTA = 16;       
+    const STOP_DELTA = 4;         
+    const SILENCE_LIMIT_MS = 700; 
+    const MIN_SPEECH_MS = 100;    
+    const MAX_RECORD_MS = 6000;   
 
     const startBtn = document.getElementById('startBtn');
     const manualBtn = document.getElementById('manualBtn');
@@ -97,7 +96,7 @@
     const meterBar = document.getElementById('meter-bar');
     const logEl = document.getElementById('log');
 
-    // Add a live sensitivity slider above the logs for quick tuning on your phone
+    // Live sensitivity slider
     const sliderContainer = document.createElement('div');
     sliderContainer.style.margin = '1rem auto';
     sliderContainer.style.maxWidth = '300px';
@@ -128,10 +127,10 @@
     startBtn.addEventListener('click', async () => {
         startBtn.disabled = true;
 
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        if (audioCtx.state === 'suspended') {
-            await audioCtx.resume();
-        }
+        // iOS Safari Requirement: Instantiation and resume MUST execute synchronously on tap
+        window.AudioContext = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AudioContext();
+        audioCtx.resume();
 
         try {
             mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -142,6 +141,11 @@
                 }
             });
 
+            // Ensure AudioContext is fully running
+            if (audioCtx.state === 'suspended') {
+                await audioCtx.resume();
+            }
+
             const source = audioCtx.createMediaStreamSource(mediaStream);
             analyser = audioCtx.createAnalyser();
             analyser.fftSize = 512;
@@ -150,13 +154,22 @@
 
             manualBtn.disabled = false;
             isListening = true;
-            setStatus("Listening...");
-            log("Calibrating background noise...");
+            
+            // Hard timeout guarantee: Never stay stuck on "Calibrating"
+            setStatus("Calibrating...", "#ffcc00");
+            setTimeout(() => {
+                if (!isRecording && !isPlaying) {
+                    setStatus("Listening...");
+                    log("Ready & Listening.");
+                }
+            }, 1000);
 
-            requestAnimationFrame(pollAudioLevel);
+            // Use high-frequency timer instead of requestAnimationFrame for iOS stability
+            if (pollInterval) clearInterval(pollInterval);
+            pollInterval = setInterval(checkAudioLevel, 30);
 
         } catch (err) {
-            log("Error: " + err.message);
+            log("Mic Error: " + err.message);
             setStatus("Mic Blocked", "#ff453a");
             startBtn.disabled = false;
         }
@@ -174,11 +187,8 @@
         }
     });
 
-    function pollAudioLevel() {
-        if (!isListening || isPlaying) {
-            requestAnimationFrame(pollAudioLevel);
-            return;
-        }
+    function checkAudioLevel() {
+        if (!isListening || isPlaying) return;
 
         const buffer = new Uint8Array(analyser.fftSize);
         analyser.getByteTimeDomainData(buffer);
@@ -195,21 +205,18 @@
 
         const now = performance.now();
 
-        // Learn ambient noise floor continuously during quiet moments
+        // Dynamically update noise floor
         if (!isRecording) {
             noiseSamples.push(volume);
-            if (noiseSamples.length > 50) noiseSamples.shift();
+            if (noiseSamples.length > 30) noiseSamples.shift();
             const avgFloor = noiseSamples.reduce((a, b) => a + b, 0) / noiseSamples.length;
-            ambientNoiseFloor = ambientNoiseFloor * 0.92 + avgFloor * 0.08;
+            ambientNoiseFloor = ambientNoiseFloor * 0.9 + avgFloor * 0.1;
         }
 
         const startThreshold = ambientNoiseFloor + TRIGGER_DELTA;
         const stopThreshold = ambientNoiseFloor + STOP_DELTA;
 
-        if (manualMode) {
-            requestAnimationFrame(pollAudioLevel);
-            return;
-        }
+        if (manualMode) return;
 
         if (!isRecording) {
             if (volume > startThreshold) {
@@ -221,15 +228,12 @@
                 speechStart = null;
             }
         } else {
-            // Safety timeout
             if (now - recordStartTime > MAX_RECORD_MS) {
                 log("Max duration reached.");
                 finishRecording();
-                requestAnimationFrame(pollAudioLevel);
                 return;
             }
 
-            // Silence detection
             if (volume <= stopThreshold) {
                 if (!silenceStart) silenceStart = now;
                 if (now - silenceStart > SILENCE_LIMIT_MS) {
@@ -239,8 +243,6 @@
                 silenceStart = null;
             }
         }
-
-        requestAnimationFrame(pollAudioLevel);
     }
 
     function beginRecording() {
@@ -251,11 +253,22 @@
         recordedChunks = [];
         setStatus("Recording...", "#ff3b30");
 
-        const mimeType = MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : 'audio/webm';
-        mediaRecorder = new MediaRecorder(mediaStream, { mimeType });
+        // iOS Safari MediaRecorder MIME types
+        let mimeType = '';
+        if (MediaRecorder.isTypeSupported('audio/mp4')) {
+            mimeType = 'audio/mp4';
+        } else if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+            mimeType = 'audio/webm;codecs=opus';
+        }
+
+        try {
+            mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
+        } catch (e) {
+            mediaRecorder = new MediaRecorder(mediaStream);
+        }
 
         mediaRecorder.ondataavailable = (e) => {
-            if (e.data.size > 0) recordedChunks.push(e.data);
+            if (e.data && e.data.size > 0) recordedChunks.push(e.data);
         };
 
         mediaRecorder.onstop = processPlayback;
@@ -275,14 +288,14 @@
         isPlaying = true;
         meterBar.style.width = "0%";
 
-        const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
+        const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/mp4' });
         const arrayBuffer = await blob.arrayBuffer();
         
         let audioBuffer;
         try {
             audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
         } catch (e) {
-            log("Audio decode failed: " + e.message);
+            log("Decode Error: " + e.message);
             resumeListening();
             return;
         }
@@ -296,7 +309,7 @@
 
         let lastNode = source;
         const mainGain = audioCtx.createGain();
-        mainGain.gain.value = 1.2;
+        mainGain.gain.value = 1.3;
         mainGain.connect(audioCtx.destination);
 
         if (mode === "chipmunk") {
@@ -341,7 +354,7 @@
         source.start();
 
         source.onended = () => {
-            setTimeout(resumeListening, 300);
+            setTimeout(resumeListening, 250);
         };
     }
 
