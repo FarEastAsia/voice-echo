@@ -127,7 +127,6 @@
     startBtn.addEventListener('click', async () => {
         startBtn.disabled = true;
 
-        // iOS Safari Requirement: Instantiation and resume MUST execute synchronously on tap
         window.AudioContext = window.AudioContext || window.webkitAudioContext;
         audioCtx = new AudioContext();
         audioCtx.resume();
@@ -141,7 +140,14 @@
                 }
             });
 
-            // Ensure AudioContext is fully running
+            // --- BEGIN iOS SAFARI WAKE UP HACK ---
+            // Safari will often provide an empty/silent stream unless we force it through an HTML5 audio element
+            const wakeUpAudio = new Audio();
+            wakeUpAudio.muted = true; // Muted to prevent awful feedback loops
+            wakeUpAudio.srcObject = mediaStream;
+            wakeUpAudio.play().catch(e => console.log("Wake up play failed:", e));
+            // --- END iOS SAFARI WAKE UP HACK ---
+
             if (audioCtx.state === 'suspended') {
                 await audioCtx.resume();
             }
@@ -151,6 +157,7 @@
             analyser.fftSize = 512;
             analyser.smoothingTimeConstant = 0.2;
             source.connect(analyser);
+
 
             manualBtn.disabled = false;
             isListening = true;
