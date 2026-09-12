@@ -206,8 +206,13 @@
             if (dev > maxDeviation) maxDeviation = dev;
         }
 
-        const volume = Math.min(100, Math.round((maxDeviation / 128) * 100));
+        // --- ADDED SENSITIVITY MULTIPLIER HERE ---
+        const micBoost = 4.0; 
+        const volume = Math.min(100, Math.round((maxDeviation / 128) * 100 * micBoost));
+        // -----------------------------------------
+
         meterBar.style.width = volume + "%";
+
         meterBar.style.background = isRecording ? "#ff3b30" : "#32d74b";
 
         const now = performance.now();
