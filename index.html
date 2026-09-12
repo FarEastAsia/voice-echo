@@ -104,7 +104,7 @@
         <label style="display:block; font-size:0.9rem; margin-bottom:4px;">
             Trigger Sensitivity Boost: <span id="deltaVal">${TRIGGER_DELTA}</span>
         </label>
-        <input type="range" id="deltaSlider" min="2" max="40" value="${TRIGGER_DELTA}" style="width:100%;">
+        <input type="range" id="deltaSlider" min="1" max="20" value="${TRIGGER_DELTA}" style="width:100%;">
     `;
     logEl.parentNode.insertBefore(sliderContainer, logEl);
 
@@ -324,55 +324,72 @@
         setStatus("Playing: " + mode, "#0a84ff");
 
         let lastNode = source;
-        const mainGain = audioCtx.createGain();
-        
-        // --- OUTPUT VOLUME BOOST ---
-        // Increased from 1.3 to 10.0 to make playback significantly louder
-        mainGain.gain.value = 10.0; 
-        // ---------------------------
-        
-        mainGain.connect(audioCtx.destination);
 
+        // 1. Extreme Pre-Gain Boost (30x multiplier)
+        const preGain = audioCtx.createGain();
+        preGain.gain.value = 30.0; 
+        
+        // 2. Dynamics Compressor (prevents blowing out speakers at 30x gain)
+        const compressor = audioCtx.createDynamicsCompressor();
+        compressor.threshold.value = -12; // Start squashing early
+        compressor.knee.value = 5;
+        compressor.ratio.value = 15;      // Heavy compression ratio
+        compressor.attack.value = 0.005;
+        compressor.release.value = 0.05;
 
+        // --- EXTREME EFFECTS ROUTING ---
         if (mode === "chipmunk") {
-            source.playbackRate.value = 2.0;
+            source.playbackRate.value = 2.8; // Pushed higher
         } else if (mode === "duck" || mode === "chicken" || mode === "monkey") {
-            source.playbackRate.value = 1.45;
+            source.playbackRate.value = 1.8;
             const shaper = audioCtx.createWaveShaper();
-            shaper.curve = makeDistortionCurve(2.5);
+            shaper.curve = makeDistortionCurve(6.0); // Doubled distortion
             lastNode.connect(shaper);
             lastNode = shaper;
         } else if (mode === "elephant" || mode === "tiger" || mode === "horse") {
-            source.playbackRate.value = 0.65;
+            source.playbackRate.value = 0.45; // Deeper and slower
             const shaper = audioCtx.createWaveShaper();
-            shaper.curve = makeDistortionCurve(4.0);
+            shaper.curve = makeDistortionCurve(10.0); // Massive distortion
             lastNode.connect(shaper);
             lastNode = shaper;
         } else if (mode === "robot" || mode === "dalek" || mode === "bee") {
             const osc = audioCtx.createOscillator();
-            osc.type = 'sine';
-            osc.frequency.value = (mode === "robot") ? 70 : (mode === "dalek" ? 40 : 220);
+            // Switched to harsh waveforms (sawtooth/square) instead of smooth sines
+            osc.type = (mode === "bee") ? 'square' : 'sawtooth';
+            osc.frequency.value = (mode === "robot") ? 55 : (mode === "dalek" ? 25 : 300);
 
             const ringMod = audioCtx.createGain();
             ringMod.gain.value = 0;
             osc.connect(ringMod.gain);
             lastNode.connect(ringMod);
-            lastNode = ringMod;
+            
+            // Added post-modulation distortion for extra grit
+            const shaper = audioCtx.createWaveShaper();
+            shaper.curve = makeDistortionCurve(5.0);
+            ringMod.connect(shaper);
+            lastNode = shaper;
+            
             osc.start();
             osc.stop(audioCtx.currentTime + (audioBuffer.duration / source.playbackRate.value) + 0.5);
         } else if (mode === "echo" || mode === "ghost") {
             const delay = audioCtx.createDelay();
-            delay.delayTime.value = mode === "echo" ? 0.25 : 0.07;
+            // Longer echoes, tighter ghost reflections
+            delay.delayTime.value = mode === "echo" ? 0.4 : 0.04; 
             const feedback = audioCtx.createGain();
-            feedback.gain.value = mode === "echo" ? 0.5 : 0.75;
+            // Heavy feedback (repeats longer)
+            feedback.gain.value = mode === "echo" ? 0.7 : 0.85; 
 
             lastNode.connect(delay);
             delay.connect(feedback);
             feedback.connect(delay);
-            delay.connect(mainGain);
+            delay.connect(preGain); 
         }
 
-        lastNode.connect(mainGain);
+        // Final connection chain
+        lastNode.connect(preGain);
+        preGain.connect(compressor);
+        compressor.connect(audioCtx.destination);
+        
         source.start();
 
         source.onended = () => {
