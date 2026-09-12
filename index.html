@@ -153,11 +153,24 @@
             }
 
             const source = audioCtx.createMediaStreamSource(mediaStream);
+            
+            // --- NEW: Boost input volume before recording & analysis ---
+            const preAmpGain = audioCtx.createGain();
+            preAmpGain.gain.value = 4.0; // Boosts actual mic input volume by 400%
+            source.connect(preAmpGain);
+
+            // Create a new stream destination to feed the boosted audio to the recorder
+            const streamDest = audioCtx.createMediaStreamDestination();
+            preAmpGain.connect(streamDest);
+            window.boostedStream = streamDest.stream; // Save this for the MediaRecorder
+            // -----------------------------------------------------------
+
             analyser = audioCtx.createAnalyser();
             analyser.fftSize = 512;
             analyser.smoothingTimeConstant = 0.2;
-            source.connect(analyser);
-
+            
+            // Connect analyser to the boosted signal so the meter easily hits the red
+            preAmpGain.connect(analyser);
 
             manualBtn.disabled = false;
             isListening = true;
@@ -277,10 +290,13 @@
             mimeType = 'audio/webm;codecs=opus';
         }
 
+                // Use the newly amplified stream instead of the quiet raw microphone
+        const streamToRecord = window.boostedStream || mediaStream;
+
         try {
-            mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
+            mediaRecorder = mimeType ? new MediaRecorder(streamToRecord, { mimeType }) : new MediaRecorder(streamToRecord);
         } catch (e) {
-            mediaRecorder = new MediaRecorder(mediaStream);
+            mediaRecorder = new MediaRecorder(streamToRecord);
         }
 
         mediaRecorder.ondataavailable = (e) => {
