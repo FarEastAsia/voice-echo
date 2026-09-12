@@ -316,6 +316,37 @@
             return;
         }
 
+        // --- BEGIN RAW PCM NORMALIZATION (Mirroring echo.py) ---
+        const rawData = audioBuffer.getChannelData(0);
+        let sumSquares = 0;
+        
+        for (let i = 0; i < rawData.length; i++) {
+            sumSquares += rawData[i] * rawData[i];
+        }
+        
+        const rms = Math.sqrt(sumSquares / rawData.length);
+        
+        if (rms > 0.0001) {
+            const targetRms = 0.45; 
+            const multiplier = targetRms / rms;
+            let peak = 0;
+            
+            // Apply RMS boost and find the new peak
+            for (let i = 0; i < rawData.length; i++) {
+                rawData[i] *= multiplier;
+                if (Math.abs(rawData[i]) > peak) peak = Math.abs(rawData[i]);
+            }
+            
+            // Hard limit peaks to 99% to prevent digital clipping
+            if (peak > 0.99) {
+                const limitScale = 0.99 / peak;
+                for (let i = 0; i < rawData.length; i++) {
+                    rawData[i] *= limitScale;
+                }
+            }
+        }
+        // --- END RAW PCM NORMALIZATION ---
+
         const source = audioCtx.createBufferSource();
         source.buffer = audioBuffer;
 
@@ -324,37 +355,34 @@
         setStatus("Playing: " + mode, "#0a84ff");
 
         let lastNode = source;
-
-        // 1. Extreme Pre-Gain Boost (30x multiplier)
-        const preGain = audioCtx.createGain();
-        preGain.gain.value = 30.0; 
         
-        // 2. Dynamics Compressor (prevents blowing out speakers at 30x gain)
-        const compressor = audioCtx.createDynamicsCompressor();
-        compressor.threshold.value = -12; // Start squashing early
-        compressor.knee.value = 5;
-        compressor.ratio.value = 15;      // Heavy compression ratio
-        compressor.attack.value = 0.005;
-        compressor.release.value = 0.05;
+        // Final output gain stage (modest, since the raw audio is now fully maximized)
+        const finalGain = audioCtx.createGain();
+        finalGain.gain.value = 2.5; 
+        
+        // Soft limiter (mimics np.tanh)
+        const limiter = audioCtx.createWaveShaper();
+        limiter.curve = makeDistortionCurve(1.5);
+        finalGain.connect(limiter);
+        limiter.connect(audioCtx.destination);
 
         // --- EXTREME EFFECTS ROUTING ---
         if (mode === "chipmunk") {
-            source.playbackRate.value = 2.8; // Pushed higher
+            source.playbackRate.value = 2.8; 
         } else if (mode === "duck" || mode === "chicken" || mode === "monkey") {
             source.playbackRate.value = 1.8;
             const shaper = audioCtx.createWaveShaper();
-            shaper.curve = makeDistortionCurve(6.0); // Doubled distortion
+            shaper.curve = makeDistortionCurve(6.0); 
             lastNode.connect(shaper);
             lastNode = shaper;
         } else if (mode === "elephant" || mode === "tiger" || mode === "horse") {
-            source.playbackRate.value = 0.45; // Deeper and slower
+            source.playbackRate.value = 0.45; 
             const shaper = audioCtx.createWaveShaper();
-            shaper.curve = makeDistortionCurve(10.0); // Massive distortion
+            shaper.curve = makeDistortionCurve(10.0); 
             lastNode.connect(shaper);
             lastNode = shaper;
         } else if (mode === "robot" || mode === "dalek" || mode === "bee") {
             const osc = audioCtx.createOscillator();
-            // Switched to harsh waveforms (sawtooth/square) instead of smooth sines
             osc.type = (mode === "bee") ? 'square' : 'sawtooth';
             osc.frequency.value = (mode === "robot") ? 55 : (mode === "dalek" ? 25 : 300);
 
@@ -363,7 +391,6 @@
             osc.connect(ringMod.gain);
             lastNode.connect(ringMod);
             
-            // Added post-modulation distortion for extra grit
             const shaper = audioCtx.createWaveShaper();
             shaper.curve = makeDistortionCurve(5.0);
             ringMod.connect(shaper);
@@ -373,23 +400,17 @@
             osc.stop(audioCtx.currentTime + (audioBuffer.duration / source.playbackRate.value) + 0.5);
         } else if (mode === "echo" || mode === "ghost") {
             const delay = audioCtx.createDelay();
-            // Longer echoes, tighter ghost reflections
             delay.delayTime.value = mode === "echo" ? 0.4 : 0.04; 
             const feedback = audioCtx.createGain();
-            // Heavy feedback (repeats longer)
             feedback.gain.value = mode === "echo" ? 0.7 : 0.85; 
 
             lastNode.connect(delay);
             delay.connect(feedback);
             feedback.connect(delay);
-            delay.connect(preGain); 
+            delay.connect(finalGain); 
         }
 
-        // Final connection chain
-        lastNode.connect(preGain);
-        preGain.connect(compressor);
-        compressor.connect(audioCtx.destination);
-        
+        lastNode.connect(finalGain);
         source.start();
 
         source.onended = () => {
