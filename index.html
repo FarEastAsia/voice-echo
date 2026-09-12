@@ -316,7 +316,7 @@
             return;
         }
 
-        // --- BEGIN RAW PCM NORMALIZATION (Mirroring echo.py) ---
+        // --- MAX VOLUME NORMALIZATION (Keeping this!) ---
         const rawData = audioBuffer.getChannelData(0);
         let sumSquares = 0;
         
@@ -331,13 +331,11 @@
             const multiplier = targetRms / rms;
             let peak = 0;
             
-            // Apply RMS boost and find the new peak
             for (let i = 0; i < rawData.length; i++) {
                 rawData[i] *= multiplier;
                 if (Math.abs(rawData[i]) > peak) peak = Math.abs(rawData[i]);
             }
             
-            // Hard limit peaks to 99% to prevent digital clipping
             if (peak > 0.99) {
                 const limitScale = 0.99 / peak;
                 for (let i = 0; i < rawData.length; i++) {
@@ -345,7 +343,7 @@
                 }
             }
         }
-        // --- END RAW PCM NORMALIZATION ---
+        // ------------------------------------------------
 
         const source = audioCtx.createBufferSource();
         source.buffer = audioBuffer;
@@ -356,53 +354,48 @@
 
         let lastNode = source;
         
-        // Final output gain stage (modest, since the raw audio is now fully maximized)
+        // Output gain and clean soft-limiter to prevent clipping
         const finalGain = audioCtx.createGain();
-        finalGain.gain.value = 2.5; 
+        finalGain.gain.value = 2.0; 
         
-        // Soft limiter (mimics np.tanh)
         const limiter = audioCtx.createWaveShaper();
-        limiter.curve = makeDistortionCurve(1.5);
+        limiter.curve = makeDistortionCurve(1.5); 
         finalGain.connect(limiter);
         limiter.connect(audioCtx.destination);
 
-        // --- EXTREME EFFECTS ROUTING ---
+        // --- RESTORED CLEAN EFFECTS (Slightly Sped Up) ---
         if (mode === "chipmunk") {
-            source.playbackRate.value = 2.8; 
+            source.playbackRate.value = 2.2; // Sped up slightly from 2.0
         } else if (mode === "duck" || mode === "chicken" || mode === "monkey") {
-            source.playbackRate.value = 1.8;
+            source.playbackRate.value = 1.6; // Sped up from 1.45
             const shaper = audioCtx.createWaveShaper();
-            shaper.curve = makeDistortionCurve(6.0); 
+            shaper.curve = makeDistortionCurve(2.0); // Restored smooth distortion
             lastNode.connect(shaper);
             lastNode = shaper;
         } else if (mode === "elephant" || mode === "tiger" || mode === "horse") {
-            source.playbackRate.value = 0.45; 
+            source.playbackRate.value = 0.6; // Slightly deeper
             const shaper = audioCtx.createWaveShaper();
-            shaper.curve = makeDistortionCurve(10.0); 
+            shaper.curve = makeDistortionCurve(3.0); // Restored smooth distortion
             lastNode.connect(shaper);
             lastNode = shaper;
         } else if (mode === "robot" || mode === "dalek" || mode === "bee") {
             const osc = audioCtx.createOscillator();
-            osc.type = (mode === "bee") ? 'square' : 'sawtooth';
-            osc.frequency.value = (mode === "robot") ? 55 : (mode === "dalek" ? 25 : 300);
+            osc.type = 'sine'; // Restored clean sine wave to remove static
+            osc.frequency.value = (mode === "robot") ? 70 : (mode === "dalek" ? 40 : 220);
 
             const ringMod = audioCtx.createGain();
             ringMod.gain.value = 0;
             osc.connect(ringMod.gain);
             lastNode.connect(ringMod);
-            
-            const shaper = audioCtx.createWaveShaper();
-            shaper.curve = makeDistortionCurve(5.0);
-            ringMod.connect(shaper);
-            lastNode = shaper;
+            lastNode = ringMod; 
             
             osc.start();
             osc.stop(audioCtx.currentTime + (audioBuffer.duration / source.playbackRate.value) + 0.5);
         } else if (mode === "echo" || mode === "ghost") {
             const delay = audioCtx.createDelay();
-            delay.delayTime.value = mode === "echo" ? 0.4 : 0.04; 
+            delay.delayTime.value = mode === "echo" ? 0.25 : 0.07; 
             const feedback = audioCtx.createGain();
-            feedback.gain.value = mode === "echo" ? 0.7 : 0.85; 
+            feedback.gain.value = mode === "echo" ? 0.5 : 0.7; 
 
             lastNode.connect(delay);
             delay.connect(feedback);
